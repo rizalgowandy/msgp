@@ -2,7 +2,8 @@ package _generated
 
 import (
 	"bytes"
-	"io/ioutil"
+	"io"
+	"reflect"
 	"testing"
 
 	"github.com/tinylib/msgp/msgp"
@@ -29,7 +30,6 @@ func mustEncodeToJSON(o msgp.Encodable) string {
 }
 
 func TestOmitEmpty0(t *testing.T) {
-
 	var s string
 
 	var oe0a OmitEmpty0
@@ -92,12 +92,75 @@ func TestOmitEmpty0(t *testing.T) {
 	if oe0c.AInt64 != oe0d.AInt64 {
 		t.Fail()
 	}
+}
 
+func TestOmitEmptyNoNames(t *testing.T) {
+	var s string
+
+	var oe0a OmitEmptyNoName
+
+	s = mustEncodeToJSON(&oe0a)
+	if s != `{"AUnnamedStruct":{},"AArrayInt":[0,0,0,0,0]}` {
+		t.Errorf("wrong result: %s", s)
+	}
+
+	var oe0b OmitEmptyNoName
+	oe0b.AString = "teststr"
+	s = mustEncodeToJSON(&oe0b)
+	if s != `{"AString":"teststr","AUnnamedStruct":{},"AArrayInt":[0,0,0,0,0]}` {
+		t.Errorf("wrong result: %s", s)
+	}
+
+	// more than 15 fields filled in
+	var oe0c OmitEmptyNoName
+	oe0c.ABool = true
+	oe0c.AInt = 1
+	oe0c.AInt8 = 1
+	oe0c.AInt16 = 1
+	oe0c.AInt32 = 1
+	oe0c.AInt64 = 1
+	oe0c.AUint = 1
+	oe0c.AUint8 = 1
+	oe0c.AUint16 = 1
+	oe0c.AUint32 = 1
+	oe0c.AUint64 = 1
+	oe0c.AFloat32 = 1
+	oe0c.AFloat64 = 1
+	oe0c.AComplex64 = complex(1, 1)
+	oe0c.AComplex128 = complex(1, 1)
+	oe0c.AString = "test"
+	oe0c.ANamedBool = true
+	oe0c.ANamedInt = 1
+	oe0c.ANamedFloat64 = 1
+
+	var buf bytes.Buffer
+	en := msgp.NewWriter(&buf)
+	err := oe0c.EncodeMsg(en)
+	if err != nil {
+		t.Fatal(err)
+	}
+	en.Flush()
+	de := msgp.NewReader(&buf)
+	var oe0d OmitEmptyNoName
+	err = oe0d.DecodeMsg(de)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// spot check some fields
+	if oe0c.AFloat32 != oe0d.AFloat32 {
+		t.Fail()
+	}
+	if oe0c.ANamedBool != oe0d.ANamedBool {
+		t.Fail()
+	}
+	if oe0c.AInt64 != oe0d.AInt64 {
+		t.Fail()
+	}
 }
 
 // TestOmitEmptyHalfFull tests mixed omitempty and not
 func TestOmitEmptyHalfFull(t *testing.T) {
-
 	var s string
 
 	var oeA OmitEmptyHalfFull
@@ -124,7 +187,6 @@ func TestOmitEmptyHalfFull(t *testing.T) {
 
 // TestOmitEmptyLotsOFields tests the case of > 64 fields (triggers the bitmask needing to be an array instead of a single value)
 func TestOmitEmptyLotsOFields(t *testing.T) {
-
 	var s string
 
 	var oeLotsA OmitEmptyLotsOFields
@@ -147,12 +209,10 @@ func TestOmitEmptyLotsOFields(t *testing.T) {
 	if s != `{"field64":"val64"}` {
 		t.Errorf("wrong result: %s", s)
 	}
-
 }
 
 func BenchmarkOmitEmpty10AllEmpty(b *testing.B) {
-
-	en := msgp.NewWriter(ioutil.Discard)
+	en := msgp.NewWriter(io.Discard)
 	var s OmitEmpty10
 
 	b.ResetTimer()
@@ -163,12 +223,10 @@ func BenchmarkOmitEmpty10AllEmpty(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-
 }
 
 func BenchmarkOmitEmpty10AllFull(b *testing.B) {
-
-	en := msgp.NewWriter(ioutil.Discard)
+	en := msgp.NewWriter(io.Discard)
 	var s OmitEmpty10
 	s.Field00 = "this is the value of field00"
 	s.Field01 = "this is the value of field01"
@@ -189,12 +247,10 @@ func BenchmarkOmitEmpty10AllFull(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-
 }
 
 func BenchmarkNotOmitEmpty10AllEmpty(b *testing.B) {
-
-	en := msgp.NewWriter(ioutil.Discard)
+	en := msgp.NewWriter(io.Discard)
 	var s NotOmitEmpty10
 
 	b.ResetTimer()
@@ -208,8 +264,7 @@ func BenchmarkNotOmitEmpty10AllEmpty(b *testing.B) {
 }
 
 func BenchmarkNotOmitEmpty10AllFull(b *testing.B) {
-
-	en := msgp.NewWriter(ioutil.Discard)
+	en := msgp.NewWriter(io.Discard)
 	var s NotOmitEmpty10
 	s.Field00 = "this is the value of field00"
 	s.Field01 = "this is the value of field01"
@@ -229,5 +284,37 @@ func BenchmarkNotOmitEmpty10AllFull(b *testing.B) {
 		if err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestTypeAlias(t *testing.T) {
+	value := TypeSamples{TypeSample{}, TypeSample{K: 1, V: 2}}
+	encoded, err := value.MarshalMsg(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got TypeSamples
+	_, err = got.UnmarshalMsg(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(value, got) {
+		t.Errorf("UnmarshalMsg got %v want %v", value, got)
+	}
+	var buf bytes.Buffer
+	w := msgp.NewWriter(&buf)
+	err = value.EncodeMsg(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Flush()
+	got = TypeSamples{}
+	r := msgp.NewReader(&buf)
+	err = got.DecodeMsg(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(value, got) {
+		t.Errorf("UnmarshalMsg got %v want %v", value, got)
 	}
 }

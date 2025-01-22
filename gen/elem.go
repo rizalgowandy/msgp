@@ -88,10 +88,11 @@ const (
 	Int32
 	Int64
 	Bool
-	Intf     // interface{}
-	Time     // time.Time
-	Duration // time.Duration
-	Ext      // extension
+	Intf       // interface{}
+	Time       // time.Time
+	Duration   // time.Duration
+	Ext        // extension
+	JsonNumber // json.Number
 
 	IDENT // IDENT means an unrecognized identifier
 )
@@ -119,27 +120,39 @@ var primitives = map[string]Primitive{
 	"int64":          Int64,
 	"bool":           Bool,
 	"interface{}":    Intf,
+	"any":            Intf,
 	"time.Time":      Time,
 	"time.Duration":  Duration,
 	"msgp.Extension": Ext,
+	"json.Number":    JsonNumber,
 }
 
 // types built into the library
 // that satisfy all of the
 // interfaces.
 var builtins = map[string]struct{}{
-	"msgp.Raw":    struct{}{},
-	"msgp.Number": struct{}{},
+	"msgp.Raw":    {},
+	"msgp.Number": {},
 }
 
 // common data/methods for every Elem
-type common struct{ vname, alias string }
+type common struct {
+	vname, alias string
+	ptrRcv       bool
+}
 
 func (c *common) SetVarname(s string) { c.vname = s }
 func (c *common) Varname() string     { return c.vname }
 func (c *common) Alias(typ string)    { c.alias = typ }
 func (c *common) hidden()             {}
 func (c *common) AllowNil() bool      { return false }
+func (c *common) SetIsAllowNil(bool)  {}
+func (c *common) AlwaysPtr(set *bool) bool {
+	if c != nil && set != nil {
+		c.ptrRcv = *set
+	}
+	return c.ptrRcv
+}
 
 func IsPrintable(e Elem) bool {
 	if be, ok := e.(*BaseElem); ok && !be.Printable() {
@@ -190,11 +203,19 @@ type Elem interface {
 	// This is true for slices and maps.
 	AllowNil() bool
 
-	// IfZeroExpr returns the expression to compare to zero/empty
-	// for this type.  It is meant to be used in an if statement
+	// SetIsAllowNil will set the allownil value, if the type supports it.
+	SetIsAllowNil(bool)
+
+	// AlwaysPtr will return true if receiver should always be a pointer.
+	AlwaysPtr(set *bool) bool
+
+	// IfZeroExpr returns the expression to compare to an empty value
+	// for this type, per the rules of the `omitempty` feature.
+	// It is meant to be used in an if statement
 	// and may include the simple statement form followed by
 	// semicolon and then the expression.
 	// Returns "" if zero/empty not supported for this Elem.
+	// Note that this is NOT used by the `omitzero` feature.
 	IfZeroExpr() string
 
 	hidden()
@@ -247,7 +268,10 @@ func (a *Array) Copy() Elem {
 	return &b
 }
 
-func (a *Array) Complexity() int { return 1 + a.Els.Complexity() }
+func (a *Array) Complexity() int {
+	// We consider the complexity constant and leave the children to decide on their own.
+	return 2
+}
 
 // ZeroExpr returns the zero/empty expression or empty string if not supported.  Unsupported for this case.
 func (a *Array) ZeroExpr() string { return "" }
@@ -258,9 +282,10 @@ func (a *Array) IfZeroExpr() string { return "" }
 // Map is a map[string]Elem
 type Map struct {
 	common
-	Keyidx string // key variable name
-	Validx string // value variable name
-	Value  Elem   // value element
+	Keyidx     string // key variable name
+	Validx     string // value variable name
+	Value      Elem   // value element
+	isAllowNil bool
 }
 
 func (m *Map) SetVarname(s string) {
@@ -291,7 +316,10 @@ func (m *Map) Copy() Elem {
 	return &g
 }
 
-func (m *Map) Complexity() int { return 2 + m.Value.Complexity() }
+func (m *Map) Complexity() int {
+	// Complexity of maps are considered constant. Children should decide on their own.
+	return 3
+}
 
 // ZeroExpr returns the zero/empty expression or empty string if not supported.  Always "nil" for this case.
 func (m *Map) ZeroExpr() string { return "nil" }
@@ -302,10 +330,14 @@ func (m *Map) IfZeroExpr() string { return m.Varname() + " == nil" }
 // AllowNil is true for maps.
 func (m *Map) AllowNil() bool { return true }
 
+// SetIsAllowNil sets whether the map is allowed to be nil.
+func (m *Map) SetIsAllowNil(b bool) { m.isAllowNil = b }
+
 type Slice struct {
 	common
-	Index string
-	Els   Elem // The type of each element
+	Index      string
+	isAllowNil bool
+	Els        Elem // The type of each element
 }
 
 func (s *Slice) SetVarname(a string) {
@@ -334,7 +366,8 @@ func (s *Slice) Copy() Elem {
 }
 
 func (s *Slice) Complexity() int {
-	return 1 + s.Els.Complexity()
+	// We leave the inlining decision to the slice children.
+	return 2
 }
 
 // ZeroExpr returns the zero/empty expression or empty string if not supported.  Always "nil" for this case.
@@ -345,6 +378,19 @@ func (s *Slice) IfZeroExpr() string { return s.Varname() + " == nil" }
 
 // AllowNil is true for slices.
 func (s *Slice) AllowNil() bool { return true }
+
+// SetIsAllowNil sets whether the slice is allowed to be nil.
+func (s *Slice) SetIsAllowNil(b bool) { s.isAllowNil = b }
+
+// SetIsAllowNil will set whether the element is allowed to be nil.
+func SetIsAllowNil(e Elem, b bool) {
+	type i interface {
+		SetIsAllowNil(b bool)
+	}
+	if x, ok := e.(i); ok {
+		x.SetIsAllowNil(b)
+	}
+}
 
 type Ptr struct {
 	common
@@ -365,6 +411,11 @@ func (s *Ptr) SetVarname(a string) {
 	case *BaseElem:
 		// identities have pointer receivers
 		if x.Value == IDENT {
+			// replace directive sets Convert=true and Needsref=true
+			// since BaseElem is behind a pointer we set Needsref=false
+			if x.Convert {
+				x.Needsref(false)
+			}
 			x.SetVarname(a)
 		} else {
 			x.SetVarname("*" + a)
@@ -476,6 +527,17 @@ func (s *Struct) AnyHasTagPart(pname string) bool {
 	return false
 }
 
+// CountFieldTagPart the count of HasTagPart(p) is true for any field.
+func (s *Struct) CountFieldTagPart(pname string) int {
+	var n int
+	for _, sf := range s.Fields {
+		if sf.HasTagPart(pname) {
+			n++
+		}
+	}
+	return n
+}
+
 type StructField struct {
 	FieldTag      string   // the string inside the `msg:""` tag up to the first comma
 	FieldTagParts []string // the string inside the `msg:""` tag split by commas
@@ -516,6 +578,7 @@ type BaseElem struct {
 	Convert      bool      // should we do an explicit conversion?
 	mustinline   bool      // must inline; not printable
 	needsref     bool      // needs reference for shim
+	allowNil     *bool     // Override from parent.
 }
 
 func (s *BaseElem) Printable() bool { return !s.mustinline }
@@ -528,6 +591,18 @@ func (s *BaseElem) Alias(typ string) {
 	if strings.Contains(typ, ".") {
 		s.mustinline = true
 	}
+}
+
+func (s *BaseElem) AllowNil() bool {
+	if s.allowNil == nil {
+		return s.Value == Bytes
+	}
+	return *s.allowNil
+}
+
+// SetIsAllowNil will override allownil when tag has been parsed.
+func (s *BaseElem) SetIsAllowNil(b bool) {
+	s.allowNil = &b
 }
 
 func (s *BaseElem) SetVarname(a string) {
@@ -583,6 +658,9 @@ func (s *BaseElem) BaseName() string {
 	if s.Value == Duration {
 		return "Duration"
 	}
+	if s.Value == JsonNumber {
+		return "JSONNumber"
+	}
 	return s.Value.String()
 }
 
@@ -601,6 +679,8 @@ func (s *BaseElem) BaseType() string {
 		return "time.Time"
 	case Duration:
 		return "time.Duration"
+	case JsonNumber:
+		return "json.Number"
 	case Ext:
 		return "msgp.Extension"
 
@@ -644,7 +724,6 @@ func (s *BaseElem) Resolved() bool {
 
 // ZeroExpr returns the zero/empty expression or empty string if not supported.
 func (s *BaseElem) ZeroExpr() string {
-
 	switch s.Value {
 	case Bytes:
 		return "nil"
@@ -669,10 +748,12 @@ func (s *BaseElem) ZeroExpr() string {
 		return "0"
 	case Bool:
 		return "false"
-
 	case Time:
 		return "(time.Time{})"
-
+	case JsonNumber:
+		return `""`
+	case Intf:
+		return "nil"
 	}
 
 	return ""
@@ -733,6 +814,8 @@ func (k Primitive) String() string {
 		return "time.Duration"
 	case Ext:
 		return "Extension"
+	case JsonNumber:
+		return "json.Number"
 	case IDENT:
 		return "Ident"
 	default:
@@ -754,7 +837,6 @@ func writeStructFields(s []StructField, name string) {
 // ArrayHeader implementation in this library using uint32. On the Go side, we
 // can declare array lengths as any constant integer width, which breaks when
 // attempting a direct comparison to an array header's uint32.
-//
 func coerceArraySize(asz string) string {
 	return fmt.Sprintf("uint32(%s)", asz)
 }

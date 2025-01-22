@@ -20,8 +20,9 @@ var (
 
 func RandBytes(sz int) []byte {
 	out := make([]byte, sz)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
 	for i := range out {
-		out[i] = byte(rand.Int63n(math.MaxInt64) % 256)
+		out[i] = byte(rng.Uint32())
 	}
 	return out
 }
@@ -34,8 +35,10 @@ func TestWriteMapHeader(t *testing.T) {
 		{0, []byte{mfixmap}},
 		{1, []byte{mfixmap | byte(1)}},
 		{100, []byte{mmap16, byte(uint16(100) >> 8), byte(uint16(100))}},
-		{tuint32,
-			[]byte{mmap32,
+		{
+			tuint32,
+			[]byte{
+				mmap32,
 				byte(tuint32 >> 24),
 				byte(tuint32 >> 16),
 				byte(tuint32 >> 8),

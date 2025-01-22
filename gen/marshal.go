@@ -3,7 +3,6 @@ package gen
 import (
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/tinylib/msgp/msgp"
 )
@@ -27,7 +26,8 @@ func (m *marshalGen) Apply(dirs []string) error {
 	return nil
 }
 
-func (m *marshalGen) Execute(p Elem) error {
+func (m *marshalGen) Execute(p Elem, ctx Context) error {
+	m.ctx = &ctx
 	if !m.p.ok() {
 		return m.p.err
 	}
@@ -39,23 +39,36 @@ func (m *marshalGen) Execute(p Elem) error {
 		return nil
 	}
 
-	m.ctx = &Context{}
-
 	m.p.comment("MarshalMsg implements msgp.Marshaler")
 
 	// save the vname before
 	// calling methodReceiver so
 	// that z.Msgsize() is printed correctly
 	c := p.Varname()
-
-	m.p.printf("\nfunc (%s %s) MarshalMsg(b []byte) (o []byte, err error) {", p.Varname(), imutMethodReceiver(p))
+	rcv := imutMethodReceiver(p)
+	ogVar := p.Varname()
+	if p.AlwaysPtr(nil) {
+		rcv = methodReceiver(p)
+	}
+	m.p.printf("\nfunc (%s %s) MarshalMsg(b []byte) (o []byte, err error) {", ogVar, rcv)
 	m.p.printf("\no = msgp.Require(b, %s.Msgsize())", c)
 	next(m, p)
+	if p.AlwaysPtr(nil) {
+		p.SetVarname(ogVar)
+	}
+
 	m.p.nakedReturn()
 	return m.p.err
 }
 
 func (m *marshalGen) rawAppend(typ string, argfmt string, arg interface{}) {
+	if m.ctx.compFloats && typ == "Float64" {
+		typ = "Float"
+	}
+	if m.ctx.newTime && typ == "Time" {
+		typ = "TimeExt"
+	}
+
 	m.p.printf("\no = msgp.Append%s(o, %s)", typ, fmt.Sprintf(argfmt, arg))
 }
 
@@ -84,7 +97,6 @@ func (m *marshalGen) gStruct(s *Struct) {
 	} else {
 		m.mapstruct(s)
 	}
-	return
 }
 
 func (m *marshalGen) tuple(s *Struct) {
@@ -99,14 +111,16 @@ func (m *marshalGen) tuple(s *Struct) {
 		if !m.p.ok() {
 			return
 		}
-		anField := s.Fields[i].HasTagPart("allownil") && s.Fields[i].FieldElem.AllowNil()
+		fieldElem := s.Fields[i].FieldElem
+		anField := s.Fields[i].HasTagPart("allownil") && fieldElem.AllowNil()
 		if anField {
-			m.p.printf("\nif %s { // allownil: if nil", s.Fields[i].FieldElem.IfZeroExpr())
+			m.p.printf("\nif %s { // allownil: if nil", fieldElem.IfZeroExpr())
 			m.p.printf("\no = msgp.AppendNil(o)")
 			m.p.printf("\n} else {")
 		}
 		m.ctx.PushString(s.Fields[i].FieldName)
-		next(m, s.Fields[i].FieldElem)
+		SetIsAllowNil(fieldElem, anField)
+		next(m, fieldElem)
 		m.ctx.Pop()
 		if anField {
 			m.p.printf("\n}") // close if statement
@@ -115,7 +129,6 @@ func (m *marshalGen) tuple(s *Struct) {
 }
 
 func (m *marshalGen) mapstruct(s *Struct) {
-
 	oeIdentPrefix := randIdent()
 
 	var data []byte
@@ -126,12 +139,14 @@ func (m *marshalGen) mapstruct(s *Struct) {
 	}
 
 	omitempty := s.AnyHasTagPart("omitempty")
+	omitzero := s.AnyHasTagPart("omitzero")
+	var closeZero bool
 	var fieldNVar string
-	if omitempty {
+	if omitempty || omitzero {
 
 		fieldNVar = oeIdentPrefix + "Len"
 
-		m.p.printf("\n// omitempty: check for empty values")
+		m.p.printf("\n// check for omitted fields")
 		m.p.printf("\n%s := uint32(%d)", fieldNVar, nfields)
 		m.p.printf("\n%s", bm.typeDecl())
 		m.p.printf("\n_ = %s", bm.varname)
@@ -144,6 +159,11 @@ func (m *marshalGen) mapstruct(s *Struct) {
 				m.p.printf("\n%s--", fieldNVar)
 				m.p.printf("\n%s", bm.setStmt(i))
 				m.p.printf("\n}")
+			} else if sf.HasTagPart("omitzero") {
+				m.p.printf("\nif %s.IsZero() {", sf.FieldElem.Varname())
+				m.p.printf("\n%s--", fieldNVar)
+				m.p.printf("\n%s", bm.setStmt(i))
+				m.p.printf("\n}")
 			}
 		}
 
@@ -153,9 +173,11 @@ func (m *marshalGen) mapstruct(s *Struct) {
 			return
 		}
 
-		// quick return for the case where the entire thing is empty, but only at the top level
-		if !strings.Contains(s.Varname(), ".") {
-			m.p.printf("\nif %s == 0 { return }", fieldNVar)
+		// Skip block, if no fields are set.
+		if nfields > 1 {
+			m.p.printf("\n\n// skip if no fields are to be emitted")
+			m.p.printf("\nif %s != 0 {", fieldNVar)
+			closeZero = true
 		}
 
 	} else {
@@ -166,6 +188,7 @@ func (m *marshalGen) mapstruct(s *Struct) {
 		m.p.printf("\n// map header, size %d", len(s.Fields))
 		m.Fuse(data)
 		if len(s.Fields) == 0 {
+			m.p.printf("\n_ = %s", s.vname)
 			m.fuseHook()
 		}
 
@@ -176,10 +199,12 @@ func (m *marshalGen) mapstruct(s *Struct) {
 			return
 		}
 
-		// if field is omitempty, wrap with if statement based on the emptymask
-		oeField := s.Fields[i].HasTagPart("omitempty") && s.Fields[i].FieldElem.IfZeroExpr() != ""
+		// if field is omitempty or omitzero, wrap with if statement based on the emptymask
+		oeField := (omitempty || omitzero) &&
+			((s.Fields[i].HasTagPart("omitempty") && s.Fields[i].FieldElem.IfZeroExpr() != "") ||
+				s.Fields[i].HasTagPart("omitzero"))
 		if oeField {
-			m.p.printf("\nif %s == 0 { // if not empty", bm.readExpr(i))
+			m.p.printf("\nif %s == 0 { // if not omitted", bm.readExpr(i))
 		}
 
 		data = msgp.AppendString(nil, s.Fields[i].FieldTag)
@@ -188,21 +213,24 @@ func (m *marshalGen) mapstruct(s *Struct) {
 		m.Fuse(data)
 		m.fuseHook()
 
-		anField := !oeField && s.Fields[i].HasTagPart("allownil") && s.Fields[i].FieldElem.AllowNil()
+		fieldElem := s.Fields[i].FieldElem
+		anField := !oeField && s.Fields[i].HasTagPart("allownil") && fieldElem.AllowNil()
 		if anField {
-			m.p.printf("\nif %s { // allownil: if nil", s.Fields[i].FieldElem.IfZeroExpr())
+			m.p.printf("\nif %s { // allownil: if nil", fieldElem.IfZeroExpr())
 			m.p.printf("\no = msgp.AppendNil(o)")
 			m.p.printf("\n} else {")
 		}
-
 		m.ctx.PushString(s.Fields[i].FieldName)
-		next(m, s.Fields[i].FieldElem)
+		SetIsAllowNil(fieldElem, anField)
+		next(m, fieldElem)
 		m.ctx.Pop()
 
 		if oeField || anField {
 			m.p.printf("\n}") // close if statement
 		}
-
+	}
+	if closeZero {
+		m.p.printf("\n}") // close if statement
 	}
 }
 
@@ -225,6 +253,7 @@ func (m *marshalGen) gMap(s *Map) {
 	m.p.printf("\nfor %s, %s := range %s {", s.Keyidx, s.Validx, vname)
 	m.rawAppend(stringTyp, literalFmt, s.Keyidx)
 	m.ctx.PushVar(s.Keyidx)
+	s.Value.SetIsAllowNil(false)
 	next(m, s.Value)
 	m.ctx.Pop()
 	m.p.closeblock()
@@ -270,7 +299,6 @@ func (m *marshalGen) gBase(b *BaseElem) {
 	}
 	m.fuseHook()
 	vname := b.Varname()
-
 	if b.Convert {
 		if b.ShimMode == Cast {
 			vname = tobaseConvert(b)
@@ -287,7 +315,7 @@ func (m *marshalGen) gBase(b *BaseElem) {
 	case IDENT:
 		echeck = true
 		m.p.printf("\no, err = %s.MarshalMsg(o)", vname)
-	case Intf, Ext:
+	case Intf, Ext, JsonNumber:
 		echeck = true
 		m.p.printf("\no, err = msgp.Append%s(o, %s)", b.BaseName(), vname)
 	default:

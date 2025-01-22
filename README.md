@@ -1,5 +1,9 @@
-MessagePack Code Generator [![Build Status](https://travis-ci.org/tinylib/msgp.svg?branch=master)](https://travis-ci.org/tinylib/msgp)
+MessagePack Code Generator
 =======
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/tinylib/msgp.svg)](https://pkg.go.dev/github.com/tinylib/msgp)
+[![test](https://github.com/tinylib/msgp/actions/workflows/test.yml/badge.svg)](https://github.com/tinylib/msgp/actions/workflows/test.yml)
+[![validate](https://github.com/tinylib/msgp/actions/workflows/validate.yml/badge.svg)](https://github.com/tinylib/msgp/actions/workflows/validate.yml)
 
 This is a code generation tool and serialization library for [MessagePack](http://msgpack.org). You can read more about MessagePack [in the wiki](http://github.com/tinylib/msgp/wiki), or at [msgpack.org](http://msgpack.org).
 
@@ -7,12 +11,14 @@ This is a code generation tool and serialization library for [MessagePack](http:
 
 - Use Go as your schema language
 - Performance
-- [JSON interop](http://godoc.org/github.com/tinylib/msgp/msgp#CopyToJSON)
+- [JSON interop](https://pkg.go.dev/github.com/tinylib/msgp/msgp#CopyToJSON)
 - [User-defined extensions](http://github.com/tinylib/msgp/wiki/Using-Extensions)
 - Type safety
 - Encoding flexibility
 
 ### Quickstart
+
+First install the `msgp` generator command. Using Go this is done with `go install github.com/tinylib/msgp@latest`
 
 In a source file, include the following directive:
 
@@ -46,6 +52,9 @@ While `msgp.Marshaler` and `msgp.Unmarshaler` are quite similar to the standard 
 `json.Marshaler` and `json.Unmarshaler`, `msgp.Encodable` and `msgp.Decodable` are useful for 
 stream serialization. (`*msgp.Writer` and `*msgp.Reader` are essentially protocol-aware versions
 of `*bufio.Writer` and `*bufio.Reader`, respectively.)
+
+An important thing to note is that msgp operates on *individual files*. 
+This means if your structs include types defined in other files, these must be processed as well.
 
 ### Features
 

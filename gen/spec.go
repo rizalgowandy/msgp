@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"strings"
 )
 
 const (
@@ -62,25 +63,6 @@ func (m Method) String() string {
 	}
 }
 
-func strtoMeth(s string) Method {
-	switch s {
-	case "encode":
-		return Encode
-	case "decode":
-		return Decode
-	case "marshal":
-		return Marshal
-	case "unmarshal":
-		return Unmarshal
-	case "size":
-		return Size
-	case "test":
-		return Test
-	default:
-		return 0
-	}
-}
-
 const (
 	Decode      Method                       = 1 << iota // msgp.Decodable
 	Encode                                               // msgp.Encodable
@@ -94,7 +76,10 @@ const (
 )
 
 type Printer struct {
-	gens []generator
+	gens          []generator
+	CompactFloats bool
+	ClearOmitted  bool
+	NewTime       bool
 }
 
 func NewPrinter(m Method, out io.Writer, tests io.Writer) *Printer {
@@ -157,13 +142,18 @@ func (p *Printer) ApplyDirective(pass Method, t TransformPass) {
 
 // Print prints an Elem.
 func (p *Printer) Print(e Elem) error {
+	e.SetIsAllowNil(false)
 	for _, g := range p.gens {
 		// Elem.SetVarname() is called before the Print() step in parse.FileSet.PrintTo().
 		// Elem.SetVarname() generates identifiers as it walks the Elem. This can cause
 		// collisions between idents created during SetVarname and idents created during Print,
 		// hence the separate prefixes.
 		resetIdent("zb")
-		err := g.Execute(e)
+		err := g.Execute(e, Context{
+			compFloats:   p.CompactFloats,
+			clearOmitted: p.ClearOmitted,
+			newTime:      p.NewTime,
+		})
 		resetIdent("za")
 
 		if err != nil {
@@ -190,7 +180,10 @@ func (c contextVar) Arg() string {
 }
 
 type Context struct {
-	path []contextItem
+	path         []contextItem
+	compFloats   bool
+	clearOmitted bool
+	newTime      bool
 }
 
 func (c *Context) PushString(s string) {
@@ -221,7 +214,7 @@ func (c *Context) ArgsStr() string {
 type generator interface {
 	Method() Method
 	Add(p TransformPass)
-	Execute(Elem) error // execute writes the method for the provided object.
+	Execute(Elem, Context) error // execute writes the method for the provided object.
 }
 
 type passes []TransformPass
@@ -337,12 +330,12 @@ func (p *printer) declare(name string, typ string) {
 
 // does:
 //
-// if m == nil {
-//     m = make(type, size)
-// } else if len(m) > 0 {
-//     for key := range m { delete(m, key) }
-// }
+//	if m == nil {
+//	    m = make(type, size)
+//	} else if len(m) > 0 {
 //
+//	    for key := range m { delete(m, key) }
+//	}
 func (p *printer) resizeMap(size string, m *Map) {
 	vn := m.Varname()
 	if !p.ok() {
@@ -379,6 +372,13 @@ func (p *printer) resizeSlice(size string, s *Slice) {
 	p.printf("\nif cap(%[1]s) >= int(%[2]s) { %[1]s = (%[1]s)[:%[2]s] } else { %[1]s = make(%[3]s, %[2]s) }", s.Varname(), size, s.TypeName())
 }
 
+// resizeSliceNoNil will resize a slice and will not allow nil slices.
+func (p *printer) resizeSliceNoNil(size string, s *Slice) {
+	p.printf("\nif %[1]s != nil && cap(%[1]s) >= int(%[2]s) {", s.Varname(), size)
+	p.printf("\n%[1]s = (%[1]s)[:%[2]s]", s.Varname(), size)
+	p.printf("\n} else { %[1]s = make(%[3]s, %[2]s) }", s.Varname(), size, s.TypeName())
+}
+
 func (p *printer) arrayCheck(want string, got string) {
 	p.printf("\nif %[1]s != %[2]s { err = msgp.ArrayError{Wanted: %[2]s, Got: %[1]s}; return }", got, want)
 }
@@ -387,12 +387,14 @@ func (p *printer) closeblock() { p.print("\n}") }
 
 // does:
 //
-// for idx := range iter {
-//     {{generate inner}}
-// }
-//
+//	for idx := range iter {
+//	    {{generate inner}}
+//	}
 func (p *printer) rangeBlock(ctx *Context, idx string, iter string, t traversal, inner Elem) {
 	ctx.PushVar(idx)
+	// Tags on slices do not extend to the elements, so we always disable allownil on elements.
+	// If we want this to happen in the future, it should be a unique tag.
+	inner.SetIsAllowNil(false)
 	p.printf("\n for %s := range %s {", idx, iter)
 	next(t, inner)
 	p.closeblock()
@@ -463,7 +465,6 @@ func (b *bmask) typeDecl() string {
 
 // typeName returns the type, e.g. "uint8" or "[2]uint64"
 func (b *bmask) typeName() string {
-
 	if b.bitlen <= 8 {
 		return "uint8"
 	}
@@ -483,7 +484,6 @@ func (b *bmask) typeName() string {
 // readExpr returns the expression to read from a position in the bitmask.
 // Compare ==0 for false or !=0 for true.
 func (b *bmask) readExpr(bitoffset int) string {
-
 	if bitoffset < 0 || bitoffset >= b.bitlen {
 		panic(fmt.Errorf("bitoffset %d out of range for bitlen %d", bitoffset, b.bitlen))
 	}
@@ -500,12 +500,10 @@ func (b *bmask) readExpr(bitoffset int) string {
 	buf.WriteByte(')')
 
 	return buf.String()
-
 }
 
 // setStmt returns the statement to set the specified bit in the bitmask.
 func (b *bmask) setStmt(bitoffset int) string {
-
 	var buf bytes.Buffer
 	buf.Grow(len(b.varname) + 16)
 	buf.WriteString(b.varname)
@@ -515,5 +513,25 @@ func (b *bmask) setStmt(bitoffset int) string {
 	fmt.Fprintf(&buf, " |= 0x%X", (uint64(1) << (uint64(bitoffset) % 64)))
 
 	return buf.String()
+}
 
+// notAllSet returns a check against all fields having been set in set.
+func (b *bmask) notAllSet() string {
+	var buf bytes.Buffer
+	buf.Grow(len(b.varname) + 16)
+	buf.WriteString(b.varname)
+	if b.bitlen > 64 {
+		var bytes []string
+		remain := b.bitlen
+		for remain >= 8 {
+			bytes = append(bytes, "0xff")
+		}
+		if remain > 0 {
+			bytes = append(bytes, fmt.Sprintf("0x%X", remain))
+		}
+		fmt.Fprintf(&buf, " != [%d]byte{%s}\n", (b.bitlen+63)/64, strings.Join(bytes, ","))
+	}
+	fmt.Fprintf(&buf, " != 0x%x", uint64(1<<b.bitlen)-1)
+
+	return buf.String()
 }

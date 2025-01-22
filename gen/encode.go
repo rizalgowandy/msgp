@@ -3,7 +3,6 @@ package gen
 import (
 	"fmt"
 	"io"
-	"strings"
 
 	"github.com/tinylib/msgp/msgp"
 )
@@ -28,6 +27,13 @@ func (e *encodeGen) Apply(dirs []string) error {
 }
 
 func (e *encodeGen) writeAndCheck(typ string, argfmt string, arg interface{}) {
+	if e.ctx.compFloats && typ == "Float64" {
+		typ = "Float"
+	}
+	if e.ctx.newTime && typ == "Time" {
+		typ = "TimeExt"
+	}
+
 	e.p.printf("\nerr = en.Write%s(%s)", typ, fmt.Sprintf(argfmt, arg))
 	e.p.wrapErrCheck(e.ctx.ArgsStr())
 }
@@ -47,7 +53,8 @@ func (e *encodeGen) Fuse(b []byte) {
 	}
 }
 
-func (e *encodeGen) Execute(p Elem) error {
+func (e *encodeGen) Execute(p Elem, ctx Context) error {
+	e.ctx = &ctx
 	if !e.p.ok() {
 		return e.p.err
 	}
@@ -59,12 +66,17 @@ func (e *encodeGen) Execute(p Elem) error {
 		return nil
 	}
 
-	e.ctx = &Context{}
-
 	e.p.comment("EncodeMsg implements msgp.Encodable")
-
-	e.p.printf("\nfunc (%s %s) EncodeMsg(en *msgp.Writer) (err error) {", p.Varname(), imutMethodReceiver(p))
+	rcv := imutMethodReceiver(p)
+	ogVar := p.Varname()
+	if p.AlwaysPtr(nil) {
+		rcv = methodReceiver(p)
+	}
+	e.p.printf("\nfunc (%s %s) EncodeMsg(en *msgp.Writer) (err error) {", ogVar, rcv)
 	next(e, p)
+	if p.AlwaysPtr(nil) {
+		p.SetVarname(ogVar)
+	}
 	e.p.nakedReturn()
 	return e.p.err
 }
@@ -78,7 +90,6 @@ func (e *encodeGen) gStruct(s *Struct) {
 	} else {
 		e.structmap(s)
 	}
-	return
 }
 
 func (e *encodeGen) tuple(s *Struct) {
@@ -93,12 +104,14 @@ func (e *encodeGen) tuple(s *Struct) {
 		if !e.p.ok() {
 			return
 		}
-		anField := s.Fields[i].HasTagPart("allownil") && s.Fields[i].FieldElem.AllowNil()
+		fieldElem := s.Fields[i].FieldElem
+		anField := s.Fields[i].HasTagPart("allownil") && fieldElem.AllowNil()
 		if anField {
-			e.p.printf("\nif %s { // allownil: if nil", s.Fields[i].FieldElem.IfZeroExpr())
+			e.p.printf("\nif %s { // allownil: if nil", fieldElem.IfZeroExpr())
 			e.p.printf("\nerr = en.WriteNil(); if err != nil { return; }")
 			e.p.printf("\n} else {")
 		}
+		SetIsAllowNil(fieldElem, anField)
 		e.ctx.PushString(s.Fields[i].FieldName)
 		next(e, s.Fields[i].FieldElem)
 		e.ctx.Pop()
@@ -120,7 +133,6 @@ func (e *encodeGen) appendraw(bts []byte) {
 }
 
 func (e *encodeGen) structmap(s *Struct) {
-
 	oeIdentPrefix := randIdent()
 
 	var data []byte
@@ -131,12 +143,14 @@ func (e *encodeGen) structmap(s *Struct) {
 	}
 
 	omitempty := s.AnyHasTagPart("omitempty")
+	omitzero := s.AnyHasTagPart("omitzero")
+	var closeZero bool
 	var fieldNVar string
-	if omitempty {
+	if omitempty || omitzero {
 
 		fieldNVar = oeIdentPrefix + "Len"
 
-		e.p.printf("\n// omitempty: check for empty values")
+		e.p.printf("\n// check for omitted fields")
 		e.p.printf("\n%s := uint32(%d)", fieldNVar, nfields)
 		e.p.printf("\n%s", bm.typeDecl())
 		e.p.printf("\n_ = %s", bm.varname)
@@ -146,6 +160,11 @@ func (e *encodeGen) structmap(s *Struct) {
 			}
 			if ize := sf.FieldElem.IfZeroExpr(); ize != "" && sf.HasTagPart("omitempty") {
 				e.p.printf("\nif %s {", ize)
+				e.p.printf("\n%s--", fieldNVar)
+				e.p.printf("\n%s", bm.setStmt(i))
+				e.p.printf("\n}")
+			} else if sf.HasTagPart("omitzero") {
+				e.p.printf("\nif %s.IsZero() {", sf.FieldElem.Varname())
 				e.p.printf("\n%s--", fieldNVar)
 				e.p.printf("\n%s", bm.setStmt(i))
 				e.p.printf("\n}")
@@ -159,18 +178,21 @@ func (e *encodeGen) structmap(s *Struct) {
 			return
 		}
 
-		// quick return for the case where the entire thing is empty, but only at the top level
-		if !strings.Contains(s.Varname(), ".") {
-			e.p.printf("\nif %s == 0 { return }", fieldNVar)
+		// Skip block, if no fields are set.
+		if nfields > 1 {
+			e.p.printf("\n\n// skip if no fields are to be emitted")
+			e.p.printf("\nif %s != 0 {", fieldNVar)
+			closeZero = true
 		}
 
 	} else {
 
-		// non-omitempty version
+		// non-omit version
 		data = msgp.AppendMapHeader(nil, uint32(nfields))
 		e.p.printf("\n// map header, size %d", nfields)
 		e.Fuse(data)
 		if len(s.Fields) == 0 {
+			e.p.printf("\n_ = %s", s.vname)
 			e.fuseHook()
 		}
 
@@ -181,23 +203,26 @@ func (e *encodeGen) structmap(s *Struct) {
 			return
 		}
 
-		// if field is omitempty, wrap with if statement based on the emptymask
-		oeField := omitempty && s.Fields[i].HasTagPart("omitempty") && s.Fields[i].FieldElem.IfZeroExpr() != ""
+		// if field is omitempty or omitzero, wrap with if statement based on the emptymask
+		oeField := (omitempty || omitzero) &&
+			((s.Fields[i].HasTagPart("omitempty") && s.Fields[i].FieldElem.IfZeroExpr() != "") ||
+				s.Fields[i].HasTagPart("omitzero"))
 		if oeField {
-			e.p.printf("\nif %s == 0 { // if not empty", bm.readExpr(i))
+			e.p.printf("\nif %s == 0 { // if not omitted", bm.readExpr(i))
 		}
 
 		data = msgp.AppendString(nil, s.Fields[i].FieldTag)
 		e.p.printf("\n// write %q", s.Fields[i].FieldTag)
 		e.Fuse(data)
 		e.fuseHook()
-
-		anField := !oeField && s.Fields[i].HasTagPart("allownil") && s.Fields[i].FieldElem.AllowNil()
+		fieldElem := s.Fields[i].FieldElem
+		anField := !oeField && s.Fields[i].HasTagPart("allownil") && fieldElem.AllowNil()
 		if anField {
 			e.p.printf("\nif %s { // allownil: if nil", s.Fields[i].FieldElem.IfZeroExpr())
 			e.p.printf("\nerr = en.WriteNil(); if err != nil { return; }")
 			e.p.printf("\n} else {")
 		}
+		SetIsAllowNil(fieldElem, anField)
 
 		e.ctx.PushString(s.Fields[i].FieldName)
 		next(e, s.Fields[i].FieldElem)
@@ -206,7 +231,9 @@ func (e *encodeGen) structmap(s *Struct) {
 		if oeField || anField {
 			e.p.print("\n}") // close if statement
 		}
-
+	}
+	if closeZero {
+		e.p.printf("\n}") // close if statement
 	}
 }
 
@@ -221,6 +248,7 @@ func (e *encodeGen) gMap(m *Map) {
 	e.p.printf("\nfor %s, %s := range %s {", m.Keyidx, m.Validx, vname)
 	e.writeAndCheck(stringTyp, literalFmt, m.Keyidx)
 	e.ctx.PushVar(m.Keyidx)
+	m.Value.SetIsAllowNil(false)
 	next(e, m.Value)
 	e.ctx.Pop()
 	e.p.closeblock()

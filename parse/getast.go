@@ -16,11 +16,16 @@ import (
 // A FileSet is the in-memory representation of a
 // parsed file.
 type FileSet struct {
-	Package    string              // package name
-	Specs      map[string]ast.Expr // type specs in file
-	Identities map[string]gen.Elem // processed from specs
-	Directives []string            // raw preprocessor directives
-	Imports    []*ast.ImportSpec   // imports
+	Package       string              // package name
+	Specs         map[string]ast.Expr // type specs in file
+	Identities    map[string]gen.Elem // processed from specs
+	Directives    []string            // raw preprocessor directives
+	Imports       []*ast.ImportSpec   // imports
+	CompactFloats bool                // Use smaller floats when feasible
+	ClearOmitted  bool                // Set omitted fields to zero value
+	NewTime       bool                // Set to use -1 extension for time.Time
+	tagName       string              // tag to read field names from
+	pointerRcv    bool                // generate with pointer receivers.
 }
 
 // File parses a file at the relative path
@@ -82,6 +87,7 @@ func File(name string, unexported bool) (*FileSet, error) {
 		return nil, fmt.Errorf("no definitions in %s", name)
 	}
 
+	fs.applyEarlyDirectives()
 	fs.process()
 	fs.applyDirectives()
 	fs.propInline()
@@ -112,6 +118,29 @@ func (f *FileSet) applyDirectives() {
 	f.Directives = newdirs
 }
 
+// applyEarlyDirectives applies all early directives needed before process() is called.
+// additional directives remain in f.Directives for future processing
+func (f *FileSet) applyEarlyDirectives() {
+	newdirs := make([]string, 0, len(f.Directives))
+	for _, d := range f.Directives {
+		parts := strings.Split(d, " ")
+		if len(parts) == 0 {
+			continue
+		}
+		if fn, ok := earlyDirectives[parts[0]]; ok {
+			pushstate(parts[0])
+			err := fn(parts, f)
+			if err != nil {
+				warnf("early directive error: %s", err)
+			}
+			popstate()
+		} else {
+			newdirs = append(newdirs, d)
+		}
+	}
+	f.Directives = newdirs
+}
+
 // A linkset is a graph of unresolved
 // identities.
 //
@@ -126,10 +155,10 @@ func (f *FileSet) applyDirectives() {
 // into just one level of indirection.
 // In other words, if we have:
 //
-//  type A uint64
-//  type B A
-//  type C B
-//  type D C
+//	type A uint64
+//	type B A
+//	type C B
+//	type D C
 //
 // ... then we want to end up
 // figuring out that D is just a uint64.
@@ -164,7 +193,6 @@ func (f *FileSet) resolve(ls linkset) {
 // process takes the contents of f.Specs and
 // uses them to populate f.Identities
 func (f *FileSet) process() {
-
 	deferred := make(linkset)
 parse:
 	for name, def := range f.Specs {
@@ -175,6 +203,7 @@ parse:
 			popstate()
 			continue parse
 		}
+		el.AlwaysPtr(&f.pointerRcv)
 		// push unresolved identities into
 		// the graph of links and resolve after
 		// we've handled every possible named type.
@@ -243,6 +272,9 @@ loop:
 			warnf("empty directive: %q\n", d)
 		}
 	}
+	p.CompactFloats = f.CompactFloats
+	p.ClearOmitted = f.ClearOmitted
+	p.NewTime = f.NewTime
 }
 
 func (f *FileSet) PrintTo(p *gen.Printer) error {
@@ -268,23 +300,18 @@ func (f *FileSet) PrintTo(p *gen.Printer) error {
 // getTypeSpecs extracts all of the *ast.TypeSpecs in the file
 // into fs.Identities, but does not set the actual element
 func (fs *FileSet) getTypeSpecs(f *ast.File) {
-
 	// collect all imports...
 	fs.Imports = append(fs.Imports, f.Imports...)
 
 	// check all declarations...
 	for i := range f.Decls {
-
 		// for GenDecls...
 		if g, ok := f.Decls[i].(*ast.GenDecl); ok {
-
 			// and check the specs...
 			for _, s := range g.Specs {
-
 				// for ast.TypeSpecs....
 				if ts, ok := s.(*ast.TypeSpec); ok {
 					switch ts.Type.(type) {
-
 					// this is the list of parse-able
 					// type specs
 					case *ast.StructType,
@@ -293,7 +320,6 @@ func (fs *FileSet) getTypeSpecs(f *ast.File) {
 						*ast.MapType,
 						*ast.Ident:
 						fs.Specs[ts.Name.Name] = ts.Type
-
 					}
 				}
 			}
@@ -336,7 +362,13 @@ func (fs *FileSet) getField(f *ast.Field) []gen.StructField {
 	var extension, flatten bool
 	// parse tag; otherwise field name is field tag
 	if f.Tag != nil {
-		body := reflect.StructTag(strings.Trim(f.Tag.Value, "`")).Get("msg")
+		var body string
+		if fs.tagName != "" {
+			body = reflect.StructTag(strings.Trim(f.Tag.Value, "`")).Get(fs.tagName)
+		}
+		if body == "" {
+			body = reflect.StructTag(strings.Trim(f.Tag.Value, "`")).Get("msg")
+		}
 		if body == "" {
 			body = reflect.StructTag(strings.Trim(f.Tag.Value, "`")).Get("msgpack")
 		}
@@ -389,7 +421,11 @@ func (fs *FileSet) getField(f *ast.Field) []gen.StructField {
 	sf[0].FieldElem = ex
 	if sf[0].FieldTag == "" {
 		sf[0].FieldTag = sf[0].FieldName
-		sf[0].FieldTagParts = []string{sf[0].FieldName}
+		if len(sf[0].FieldTagParts) <= 1 {
+			sf[0].FieldTagParts = []string{sf[0].FieldTag}
+		} else {
+			sf[0].FieldTagParts = append([]string{sf[0].FieldName}, sf[0].FieldTagParts[1:]...)
+		}
 	}
 
 	// validate extension
@@ -432,9 +468,9 @@ func (fs *FileSet) getFieldsFromEmbeddedStruct(f ast.Expr) []gen.StructField {
 //
 // so, for a struct like
 //
-//	type A struct {
-//		io.Writer
-//  }
+//		type A struct {
+//			io.Writer
+//	 }
 //
 // we want "Writer"
 func embedded(f ast.Expr) string {
@@ -496,7 +532,7 @@ func (fs *FileSet) parseExpr(e ast.Expr) gen.Elem {
 	case *ast.Ident:
 		b := gen.Ident(e.Name)
 
-		// work to resove this expression
+		// work to resolve this expression
 		// can be done later, once we've resolved
 		// everything else.
 		if b.Value == gen.IDENT {
@@ -578,7 +614,7 @@ var Logf func(s string, v ...interface{})
 func infof(s string, v ...interface{}) {
 	if Logf != nil {
 		pushstate(s)
-		Logf("info: " + strings.Join(logctx, ": "), v...)
+		Logf("info: "+strings.Join(logctx, ": "), v...)
 		popstate()
 	}
 }
@@ -586,7 +622,7 @@ func infof(s string, v ...interface{}) {
 func warnf(s string, v ...interface{}) {
 	if Logf != nil {
 		pushstate(s)
-		Logf("warn: " + strings.Join(logctx, ": "), v...)
+		Logf("warn: "+strings.Join(logctx, ": "), v...)
 		popstate()
 	}
 }
@@ -602,4 +638,3 @@ func pushstate(s string) {
 func popstate() {
 	logctx = logctx[:len(logctx)-1]
 }
-

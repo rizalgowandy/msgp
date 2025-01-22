@@ -69,7 +69,8 @@ func (s *sizeGen) addConstant(sz string) {
 	panic("unknown size state")
 }
 
-func (s *sizeGen) Execute(p Elem) error {
+func (s *sizeGen) Execute(p Elem, ctx Context) error {
+	s.ctx = &ctx
 	if !s.p.ok() {
 		return s.p.err
 	}
@@ -81,14 +82,21 @@ func (s *sizeGen) Execute(p Elem) error {
 		return nil
 	}
 
-	s.ctx = &Context{}
 	s.ctx.PushString(p.TypeName())
 
 	s.p.comment("Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message")
 
-	s.p.printf("\nfunc (%s %s) Msgsize() (s int) {", p.Varname(), imutMethodReceiver(p))
+	rcv := imutMethodReceiver(p)
+	ogVar := p.Varname()
+	if p.AlwaysPtr(nil) {
+		rcv = methodReceiver(p)
+	}
+	s.p.printf("\nfunc (%s %s) Msgsize() (s int) {", ogVar, rcv)
 	s.state = assign
 	next(s, p)
+	if p.AlwaysPtr(nil) {
+		p.SetVarname(ogVar)
+	}
 	s.p.nakedReturn()
 	return s.p.err
 }

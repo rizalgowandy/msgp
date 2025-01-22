@@ -1,6 +1,7 @@
 package _generated
 
 import (
+	"encoding/json"
 	"os"
 	"time"
 
@@ -30,6 +31,7 @@ type X struct {
 	Others    [][32]int32 // should compile to len(x.Others)*32*msgp.Int32Size
 	Matrix    [][]int32   // should not optimize
 	ManyFixed []Fixed
+	WeirdTag  string `msg:"\x0b"`
 }
 
 // test fixed-size struct
@@ -46,27 +48,31 @@ type TestType struct {
 		ValueA string `msg:"value_a"`
 		ValueB []byte `msg:"value_b"`
 	} `msg:"object"`
-	Child      *TestType   `msg:"child"`
-	Time       time.Time   `msg:"time"`
-	Any        interface{} `msg:"any"`
-	Appended   msgp.Raw    `msg:"appended"`
-	Num        msgp.Number `msg:"num"`
-	Byte       byte
-	Rune       rune
-	RunePtr    *rune
-	RunePtrPtr **rune
-	RuneSlice  []rune
-	Slice1     []string
-	Slice2     []string
-	SlicePtr   *[]string
+	Child           *TestType   `msg:"child"`
+	Time            time.Time   `msg:"time"`
+	Any             interface{} `msg:"any"`
+	Appended        msgp.Raw    `msg:"appended"`
+	Num             msgp.Number `msg:"num"`
+	Byte            byte
+	Rune            rune
+	RunePtr         *rune
+	RunePtrPtr      **rune
+	RuneSlice       []rune
+	Slice1          []string
+	Slice2          []string
+	SlicePtr        *[]string
+	MapStringEmpty  map[string]struct{}
+	MapStringEmpty2 map[string]EmptyStruct
 }
 
 //msgp:tuple Object
 type Object struct {
-	ObjectNo string   `msg:"objno"`
-	Slice1   []string `msg:"slice1"`
-	Slice2   []string `msg:"slice2"`
-	MapMap   map[string]map[string]string
+	ObjectNo        string   `msg:"objno"`
+	Slice1          []string `msg:"slice1"`
+	Slice2          []string `msg:"slice2"`
+	MapMap          map[string]map[string]string
+	MapStringEmpty  map[string]struct{}
+	MapStringEmpty2 map[string]EmptyStruct
 }
 
 //msgp:tuple TestBench
@@ -88,15 +94,19 @@ type TestFast struct {
 }
 
 // Test nested aliases
-type FastAlias TestFast
-type AliasContainer struct {
-	Fast FastAlias
-}
+type (
+	FastAlias      TestFast
+	AliasContainer struct {
+		Fast FastAlias
+	}
+)
 
 // Test dependency resolution
-type IntA int
-type IntB IntA
-type IntC IntB
+type (
+	IntA int
+	IntB IntA
+	IntC IntB
+)
 
 type TestHidden struct {
 	A   string
@@ -124,8 +134,10 @@ type Things struct {
 
 //msgp:shim SpecialID as:[]byte using:toBytes/fromBytes
 
-type SpecialID string
-type TestObj struct{ ID1, ID2 SpecialID }
+type (
+	SpecialID string
+	TestObj   struct{ ID1, ID2 SpecialID }
+)
 
 func toBytes(id SpecialID) []byte   { return []byte(string(id)) }
 func fromBytes(id []byte) SpecialID { return SpecialID(string(id)) }
@@ -204,8 +216,10 @@ type FileHandle struct {
 	Name     string `msg:"name"`
 }
 
-type CustomInt int
-type CustomBytes []byte
+type (
+	CustomInt   int
+	CustomBytes []byte
+)
 
 type Wrapper struct {
 	Tree *Tree
@@ -243,7 +257,7 @@ type ArrayConstants struct {
 	ConstantUint32 [ConstantUint32]string
 	ConstantUint64 [ConstantUint64]string
 	ConstantHex    [0x16]string
-	ConstantOctal  [07]string
+	ConstantOctal  [0o7]string
 }
 
 // Ensure non-msg struct tags work:
@@ -258,8 +272,55 @@ type NonMsgStructTags struct {
 		B          string   `json:"b"`
 		C          []string `json:"c"`
 		VeryNested []struct {
-			A []string `json:"a"`
-			B []string `msg:"bbbb" xml:"-"`
+			A []string            `json:"a"`
+			B []string            `msg:"bbbb" xml:"-"`
+			C map[string]struct{} `msg:"cccc"`
 		}
 	}
 }
+
+type EmptyStruct struct{}
+
+type StructByteSlice struct {
+	ABytes      []byte       `msg:",allownil"`
+	AString     []string     `msg:",allownil"`
+	ABool       []bool       `msg:",allownil"`
+	AInt        []int        `msg:",allownil"`
+	AInt8       []int8       `msg:",allownil"`
+	AInt16      []int16      `msg:",allownil"`
+	AInt32      []int32      `msg:",allownil"`
+	AInt64      []int64      `msg:",allownil"`
+	AUint       []uint       `msg:",allownil"`
+	AUint8      []uint8      `msg:",allownil"`
+	AUint16     []uint16     `msg:",allownil"`
+	AUint32     []uint32     `msg:",allownil"`
+	AUint64     []uint64     `msg:",allownil"`
+	AFloat32    []float32    `msg:",allownil"`
+	AFloat64    []float64    `msg:",allownil"`
+	AComplex64  []complex64  `msg:",allownil"`
+	AComplex128 []complex128 `msg:",allownil"`
+	AStruct     []Fixed      `msg:",allownil"`
+}
+
+type NumberJSONSample struct {
+	Single json.Number
+	Array  []json.Number
+	Map    map[string]json.Number
+	OE     json.Number `msg:",omitempty"`
+}
+
+type Flobbity struct {
+	A Flobs `msg:"a,omitempty"`
+	B Flobs `msg:"b,omitempty"`
+}
+
+type Flobs []Flob
+
+type Flob struct {
+	X Numberwang `msg:"x"`
+	Y int8       `msg:"y"`
+	Z int8       `msg:"z"`
+	W int32      `msg:"w"`
+}
+
+type Numberwang int8

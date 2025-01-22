@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"os"
 	"strings"
 
 	"github.com/tinylib/msgp/gen"
@@ -42,6 +42,11 @@ func PrintFile(file string, f *parse.FileSet, mode gen.Method) error {
 	}
 	err = <-res
 	if err != nil {
+		os.WriteFile(file+".broken", out.Bytes(), os.ModePerm)
+		if Logf != nil {
+			Logf("Error: %s. Wrote broken output to %s\n", err, file+".broken")
+		}
+
 		return err
 	}
 	return nil
@@ -52,7 +57,7 @@ func format(file string, data []byte) error {
 	if err != nil {
 		return err
 	}
-	return ioutil.WriteFile(file, out, 0600)
+	return os.WriteFile(file, out, 0o600)
 }
 
 func goformat(file string, data []byte) <-chan error {

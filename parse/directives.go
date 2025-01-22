@@ -3,6 +3,7 @@ package parse
 import (
 	"fmt"
 	"go/ast"
+	"go/parser"
 	"strings"
 
 	"github.com/tinylib/msgp/gen"
@@ -21,9 +22,23 @@ type passDirective func(gen.Method, []string, *gen.Printer) error
 // to add a directive, define a func([]string, *FileSet) error
 // and then add it to this list.
 var directives = map[string]directive{
-	"shim":   applyShim,
-	"ignore": ignore,
-	"tuple":  astuple,
+	"shim":          applyShim,
+	"replace":       replace,
+	"ignore":        ignore,
+	"tuple":         astuple,
+	"compactfloats": compactfloats,
+	"clearomitted":  clearomitted,
+	"newtime":       newtime,
+}
+
+// map of all recognized directives which will be applied
+// before process() is called
+//
+// to add an early directive, define a func([]string, *FileSet) error
+// and then add it to this list.
+var earlyDirectives = map[string]directive{
+	"tag":     tag,
+	"pointer": pointer,
 }
 
 var passDirectives = map[string]passDirective{
@@ -53,7 +68,7 @@ func yieldComments(c []*ast.CommentGroup) []string {
 	return out
 }
 
-//msgp:shim {Type} as:{Newtype} using:{toFunc/fromFunc} mode:{Mode}
+//msgp:shim {Type} as:{NewType} using:{toFunc/fromFunc} mode:{Mode}
 func applyShim(text []string, f *FileSet) error {
 	if len(text) < 4 || len(text) > 5 {
 		return fmt.Errorf("shim directive should have 3 or 4 arguments; found %d", len(text)-1)
@@ -90,7 +105,38 @@ func applyShim(text []string, f *FileSet) error {
 	}
 
 	infof("%s -> %s\n", name, be.Value.String())
-	f.findShim(name, be)
+	f.findShim(name, be, true)
+
+	return nil
+}
+
+//msgp:replace {Type} with:{NewType}
+func replace(text []string, f *FileSet) error {
+	if len(text) != 3 {
+		return fmt.Errorf("replace directive should have only 2 arguments; found %d", len(text)-1)
+	}
+
+	name := text[1]
+	replacement := strings.TrimPrefix(strings.TrimSpace(text[2]), "with:")
+
+	expr, err := parser.ParseExpr(replacement)
+	if err != nil {
+		return err
+	}
+	e := f.parseExpr(expr)
+	e.AlwaysPtr(&f.pointerRcv)
+
+	if be, ok := e.(*gen.BaseElem); ok {
+		be.Convert = true
+		be.Alias(name)
+		if be.Value == gen.IDENT {
+			be.ShimToBase = "(*" + replacement + ")"
+			be.Needsref(true)
+		}
+	}
+
+	infof("%s -> %s\n", name, replacement)
+	f.findShim(name, e, false)
 
 	return nil
 }
@@ -126,5 +172,38 @@ func astuple(text []string, f *FileSet) error {
 			}
 		}
 	}
+	return nil
+}
+
+//msgp:tag {tagname}
+func tag(text []string, f *FileSet) error {
+	if len(text) != 2 {
+		return nil
+	}
+	f.tagName = strings.TrimSpace(text[1])
+	return nil
+}
+
+//msgp:pointer
+func pointer(text []string, f *FileSet) error {
+	f.pointerRcv = true
+	return nil
+}
+
+//msgp:compactfloats
+func compactfloats(text []string, f *FileSet) error {
+	f.CompactFloats = true
+	return nil
+}
+
+//msgp:clearomitted
+func clearomitted(text []string, f *FileSet) error {
+	f.ClearOmitted = true
+	return nil
+}
+
+//msgp:newtime
+func newtime(text []string, f *FileSet) error {
+	f.NewTime = true
 	return nil
 }

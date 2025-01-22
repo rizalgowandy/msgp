@@ -3,6 +3,9 @@ package msgp
 import (
 	"bytes"
 	"math"
+	"math/rand"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -129,6 +132,74 @@ func TestAppendNil(t *testing.T) {
 	bts = AppendNil(bts[0:0])
 	if bts[0] != mnil {
 		t.Fatal("bts[0] is not 'nil'")
+	}
+}
+
+func TestAppendFloat(t *testing.T) {
+	rng := rand.New(rand.NewSource(0))
+	const n = 1e7
+	src := make([]float64, n)
+	for i := range src {
+		// ~50% full float64, 50% converted from float32.
+		if rng.Uint32()&1 == 1 {
+			src[i] = rng.NormFloat64()
+		} else {
+			src[i] = float64(math.MaxFloat32 * (0.5 - rng.Float32()))
+		}
+	}
+
+	var buf bytes.Buffer
+	en := NewWriter(&buf)
+
+	var bts []byte
+	for _, f := range src {
+		en.WriteFloat(f)
+		bts = AppendFloat(bts, f)
+	}
+	en.Flush()
+	if buf.Len() != len(bts) {
+		t.Errorf("encoder wrote %d; append wrote %d bytes", buf.Len(), len(bts))
+	}
+	t.Logf("%f bytes/value", float64(buf.Len())/n)
+	a, b := bts, buf.Bytes()
+	for i := range a {
+		if a[i] != b[i] {
+			t.Errorf("mismatch at byte %d, %d != %d", i, a[i], b[i])
+			break
+		}
+	}
+
+	for i, want := range src {
+		var got float64
+		var err error
+		got, a, err = ReadFloat64Bytes(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want != got {
+			t.Errorf("value #%d: want %v; got %v", i, want, got)
+		}
+	}
+}
+
+func BenchmarkAppendFloat(b *testing.B) {
+	rng := rand.New(rand.NewSource(0))
+	const n = 1 << 16
+	src := make([]float64, n)
+	for i := range src {
+		// ~50% full float64, 50% converted from float32.
+		if rng.Uint32()&1 == 1 {
+			src[i] = rng.NormFloat64()
+		} else {
+			src[i] = float64(math.MaxFloat32 * (0.5 - rng.Float32()))
+		}
+	}
+	buf := make([]byte, 0, 9)
+	b.SetBytes(8)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		AppendFloat(buf, src[i&(n-1)])
 	}
 }
 
@@ -346,5 +417,146 @@ func BenchmarkAppendTime(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		AppendTime(buf[0:0], t)
+	}
+}
+
+func BenchmarkAppendTimeExt(b *testing.B) {
+	t := time.Now()
+	buf := make([]byte, 0, 15)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		AppendTimeExt(buf[0:0], t)
+	}
+}
+
+// TestEncodeDecode does a back-and-forth test of encoding and decoding and compare the value with a given output.
+func TestEncodeDecode(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		input       interface{}
+		output      interface{}
+		encodeError string
+	}{
+		{
+			name:  "nil",
+			input: nil,
+		},
+		{
+			name:  "bool",
+			input: true,
+		},
+		{
+			name:  "int",
+			input: int64(42),
+		},
+		{
+			name:  "float",
+			input: 3.14159,
+		},
+		{
+			name:  "string",
+			input: "hello",
+		},
+		{
+			name:  "bytes",
+			input: []byte("hello"),
+		},
+		{
+			name:  "array-empty",
+			input: []interface{}{},
+		},
+		{
+			name:  "array",
+			input: []interface{}{int64(1), int64(2), int64(3)},
+		},
+		{
+			name:  "map-empty",
+			input: map[string]interface{}{},
+		},
+		{
+			name:  "map",
+			input: map[string]interface{}{"a": int64(1), "b": int64(2)},
+		},
+		{
+			name:  "map-interface",
+			input: map[string]interface{}{"a": int64(1), "b": "2"},
+		},
+		{
+			name:   "map-string",
+			input:  map[string]string{"a": "1", "b": "2"},
+			output: map[string]interface{}{"a": "1", "b": "2"},
+		},
+		{
+			name:   "map-array",
+			input:  map[string][]int64{"a": {1, 2}, "b": {3}},
+			output: map[string]interface{}{"a": []interface{}{int64(1), int64(2)}, "b": []interface{}{int64(3)}},
+		},
+		{
+			name:   "map-map",
+			input:  map[string]map[string]int64{"a": {"a": 1, "b": 2}, "b": {"c": 3}},
+			output: map[string]interface{}{"a": map[string]interface{}{"a": int64(1), "b": int64(2)}, "b": map[string]interface{}{"c": int64(3)}},
+		},
+		{
+			name:   "array-map",
+			input:  []interface{}{map[string]interface{}{"a": int64(1), "b": "2"}, map[string]int64{"c": 3}},
+			output: []interface{}{map[string]interface{}{"a": int64(1), "b": "2"}, map[string]interface{}{"c": int64(3)}},
+		},
+		{
+			name:   "array-array",
+			input:  []interface{}{[]int64{1, 2}, []interface{}{int64(3)}},
+			output: []interface{}{[]interface{}{int64(1), int64(2)}, []interface{}{int64(3)}},
+		},
+		{
+			name:  "array-array-map",
+			input: []interface{}{[]interface{}{int64(1), int64(2)}, map[string]interface{}{"c": int64(3)}},
+		},
+		{
+			name:  "map-array-map",
+			input: map[string]interface{}{"a": []interface{}{int64(1), int64(2)}, "b": map[string]interface{}{"c": int64(3)}},
+		},
+		{
+			name:        "map-invalid-keys",
+			input:       map[interface{}]interface{}{int64(1): int64(2)},
+			encodeError: "msgp: map keys must be strings",
+		},
+		{
+			name:        "map-nested-invalid-keys",
+			input:       map[string]interface{}{"a": map[int64]string{1: "2"}},
+			encodeError: "msgp: map keys must be strings",
+		},
+		{
+			name:        "invalid-type",
+			input:       struct{}{},
+			encodeError: "msgp: type \"struct {}\" not supported",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// If no output is given, use the input as output
+			if tc.output == nil {
+				tc.output = tc.input
+			}
+
+			buf, err := AppendIntf(nil, tc.input)
+			if tc.encodeError != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.encodeError) {
+					t.Fatalf("expected encode error '%s' but got '%s'", tc.encodeError, err)
+				}
+				return
+			}
+
+			if tc.encodeError == "" && err != nil {
+				t.Fatalf("expected no encode error but got '%s'", err.Error())
+			}
+
+			out, _, _ := ReadIntfBytes(buf)
+			if err != nil {
+				t.Fatalf("expected no decode error but got '%s'", err.Error())
+			}
+
+			if !reflect.DeepEqual(tc.output, out) {
+				t.Fatalf("expected '%v' but got '%v'", tc.input, out)
+			}
+		})
 	}
 }

@@ -1,5 +1,5 @@
 
-# NOTE: This Makefile is only necessary if you 
+# NOTE: This Makefile is only necessary if you
 # plan on developing the msgp tool and library.
 # Installation can still be performed with a
 # normal `go install`.
@@ -13,7 +13,7 @@ SHELL := /bin/bash
 
 BIN = $(GOBIN)/msgp
 
-.PHONY: clean wipe install get-deps bench all
+.PHONY: clean wipe install get-deps bench all ci prepare
 
 $(BIN): */*.go
 	@go install ./...
@@ -43,12 +43,20 @@ get-deps:
 
 all: install $(GGEN) $(MGEN)
 
-# travis CI enters here
-travis:
-	arch
-	if [ `arch` == 'x86_64' ]; then sudo apt update; sudo apt install build-essential; wget https://github.com/tinygo-org/tinygo/releases/download/v0.18.0/tinygo_0.18.0_amd64.deb; sudo dpkg -i tinygo_0.18.0_amd64.deb; export PATH=$PATH:/usr/local/tinygo/bin; fi
-	go get -d -t ./...
-	go build -o "$${GOPATH%%:*}/bin/msgp" .
+# Prepare generated code to be used for linting and testing in CI
+prepare:
+	go install .
 	go generate ./msgp
 	go generate ./_generated
+
+# CI enters here
+ci: prepare
+	arch
+	if [ `arch` == 'x86_64' ]; then \
+		sudo apt-get -y -q update; \
+		sudo apt-get -y -q install build-essential; \
+		wget -q https://github.com/tinygo-org/tinygo/releases/download/v0.33.0/tinygo_0.33.0_amd64.deb; \
+		sudo dpkg -i tinygo_0.33.0_amd64.deb; \
+		export PATH=$$PATH:/usr/local/tinygo/bin; \
+	fi
 	go test -v ./... ./_generated
